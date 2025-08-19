@@ -97,7 +97,7 @@ function getEmbeddingApiKey(runtime: IAgentRuntime): string | undefined {
 function getSmallModel(runtime: IAgentRuntime): string {
   return (
     getSetting(runtime, 'OPENAI_SMALL_MODEL') ??
-    (getSetting(runtime, 'SMALL_MODEL', 'gpt-4o-mini') as string)
+    (getSetting(runtime, 'SMALL_MODEL', 'gpt-5-nano') as string)
   );
 }
 
@@ -110,7 +110,7 @@ function getSmallModel(runtime: IAgentRuntime): string {
 function getLargeModel(runtime: IAgentRuntime): string {
   return (
     getSetting(runtime, 'OPENAI_LARGE_MODEL') ??
-    (getSetting(runtime, 'LARGE_MODEL', 'gpt-4o') as string)
+    (getSetting(runtime, 'LARGE_MODEL', 'gpt-5-mini') as string)
   );
 }
 
@@ -121,7 +121,7 @@ function getLargeModel(runtime: IAgentRuntime): string {
  * @returns The configured image description model name
  */
 function getImageDescriptionModel(runtime: IAgentRuntime): string {
-  return getSetting(runtime, 'OPENAI_IMAGE_DESCRIPTION_MODEL', 'gpt-4o-mini') ?? 'gpt-4o-mini';
+  return getSetting(runtime, 'OPENAI_IMAGE_DESCRIPTION_MODEL', 'gpt-5-nano') ?? 'gpt-5-nano';
 }
 
 /**
@@ -164,8 +164,8 @@ function createOpenAIClient(runtime: IAgentRuntime) {
 async function tokenizeText(model: ModelTypeName, prompt: string) {
   const modelName =
     model === ModelType.TEXT_SMALL
-      ? (process.env.OPENAI_SMALL_MODEL ?? process.env.SMALL_MODEL ?? 'gpt-4o-mini')
-      : (process.env.LARGE_MODEL ?? 'gpt-4o');
+      ? (process.env.OPENAI_SMALL_MODEL ?? process.env.SMALL_MODEL ?? 'gpt-5-nano')
+      : (process.env.LARGE_MODEL ?? 'gpt-5-mini');
   const encoding = encodingForModel(modelName as TiktokenModel);
   const tokens = encoding.encode(prompt);
   return tokens;
@@ -181,8 +181,8 @@ async function tokenizeText(model: ModelTypeName, prompt: string) {
 async function detokenizeText(model: ModelTypeName, tokens: number[]) {
   const modelName =
     model === ModelType.TEXT_SMALL
-      ? (process.env.OPENAI_SMALL_MODEL ?? process.env.SMALL_MODEL ?? 'gpt-4o-mini')
-      : (process.env.OPENAI_LARGE_MODEL ?? process.env.LARGE_MODEL ?? 'gpt-4o');
+      ? (process.env.OPENAI_SMALL_MODEL ?? process.env.SMALL_MODEL ?? 'gpt-5-nano')
+      : (process.env.OPENAI_LARGE_MODEL ?? process.env.LARGE_MODEL ?? 'gpt-5-mini');
   const encoding = encodingForModel(modelName as TiktokenModel);
   return encoding.decode(tokens);
 }
