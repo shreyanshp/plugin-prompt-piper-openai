@@ -1,4 +1,4 @@
-# OpenAI Plugin
+# Prompt Piper OpenAI Plugin
 
 This plugin provides integration with OpenAI's models through the ElizaOS platform.
 
