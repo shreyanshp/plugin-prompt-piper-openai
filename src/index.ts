@@ -20,6 +20,7 @@ import {
 } from 'ai';
 import { encodingForModel, type TiktokenModel } from 'js-tiktoken';
 import { fetch, FormData } from 'undici';
+import { PromptCompressorV3, type CompressionOptions, type CompressionResult } from './compressor';
 
 /**
  * Retrieves a configuration setting from the runtime, falling back to environment variables or a default value if not found.
@@ -142,6 +143,100 @@ function getExperimentalTelemetry(runtime: IAgentRuntime): boolean {
 }
 
 /**
+ * Helper function to check if prompt compression is enabled
+ *
+ * @param runtime The runtime context
+ * @returns Whether prompt compression is enabled
+ */
+function isCompressionEnabled(runtime: IAgentRuntime): boolean {
+  const setting = getSetting(runtime, 'OPENAI_ENABLE_PROMPT_COMPRESSION', 'true');
+  return String(setting).toLowerCase() === 'true';
+}
+
+/**
+ * Helper function to get compression options from runtime settings
+ *
+ * @param runtime The runtime context
+ * @returns Compression options
+ */
+function getCompressionOptions(runtime: IAgentRuntime): CompressionOptions {
+  const options: CompressionOptions = {};
+  
+  const ruleSetIds = getSetting(runtime, 'OPENAI_COMPRESSION_RULE_SET_IDS');
+  if (ruleSetIds) {
+    options.ruleSetIds = ruleSetIds.split(',').map(id => id.trim());
+  }
+  
+  const language = getSetting(runtime, 'OPENAI_COMPRESSION_LANGUAGE');
+  if (language) {
+    options.language = language;
+  }
+  
+  const category = getSetting(runtime, 'OPENAI_COMPRESSION_CATEGORY');
+  if (category && ['general', 'programming', 'domain-specific'].includes(category)) {
+    options.category = category as 'general' | 'programming' | 'domain-specific';
+  }
+  
+  return options;
+}
+
+/**
+ * Compress a prompt using the PromptCompressorV3
+ *
+ * @param runtime The runtime context
+ * @param prompt The prompt to compress
+ * @param modelType The model type being used (for logging)
+ * @returns The compressed prompt and compression metrics
+ */
+function compressPrompt(
+  runtime: IAgentRuntime,
+  prompt: string,
+  modelType: string
+): { compressedPrompt: string; compressionResult: CompressionResult | null } {
+  if (!isCompressionEnabled(runtime)) {
+    return { compressedPrompt: prompt, compressionResult: null };
+  }
+  
+  try {
+    const options = getCompressionOptions(runtime);
+    const compressionResult = PromptCompressorV3.analyze(prompt, options);
+    
+    // Log compression metrics
+    if (compressionResult.savedTokens > 0) {
+      logger.info(
+        `[OpenAI Compression] ${modelType}: Reduced ${compressionResult.originalTokens} tokens to ${compressionResult.compressedTokens} ` +
+        `(saved ${compressionResult.savedTokens} tokens, ${compressionResult.compressionRatio.toFixed(2)}% reduction, ` +
+        `$${compressionResult.savedCost.toFixed(4)} saved)`
+      );
+      
+      // Emit compression event for tracking
+      runtime.emitEvent(EventType.MODEL_USED, {
+        provider: 'openai',
+        type: 'compression',
+        originalTokens: compressionResult.originalTokens,
+        compressedTokens: compressionResult.compressedTokens,
+        savedTokens: compressionResult.savedTokens,
+        compressionRatio: compressionResult.compressionRatio,
+        savedCost: compressionResult.savedCost,
+        ruleSetsUsed: compressionResult.ruleSetsUsed,
+      });
+    } else {
+      logger.debug(`[OpenAI Compression] ${modelType}: No compression achieved`);
+    }
+    
+    return { 
+      compressedPrompt: compressionResult.compressedPrompt, 
+      compressionResult 
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(`[OpenAI Compression] Failed to compress prompt: ${message}`);
+    // Fall back to original prompt if compression fails
+    return { compressedPrompt: prompt, compressionResult: null };
+  }
+}
+
+/**
  * Create an OpenAI client with proper configuration
  *
  * @param runtime The runtime context
@@ -208,17 +303,20 @@ async function generateObjectByModelType(
     );
   }
 
+  // Compress the prompt before sending
+  const { compressedPrompt } = compressPrompt(runtime, params.prompt, modelType);
+
   try {
     const { object, usage } = await generateObject({
       model: openai.languageModel(modelName),
       output: 'no-schema',
-      prompt: params.prompt,
+      prompt: compressedPrompt,
       temperature: temperature,
       experimental_repairText: getJsonRepairFunction(),
     });
 
     if (usage) {
-      emitModelUsageEvent(runtime, modelType as ModelTypeName, params.prompt, usage);
+      emitModelUsageEvent(runtime, modelType as ModelTypeName, compressedPrompt, usage);
     }
     return object;
   } catch (error: unknown) {
@@ -360,6 +458,11 @@ export const openaiPlugin: Plugin = {
     OPENAI_IMAGE_DESCRIPTION_MODEL: process.env.OPENAI_IMAGE_DESCRIPTION_MODEL,
     OPENAI_IMAGE_DESCRIPTION_MAX_TOKENS: process.env.OPENAI_IMAGE_DESCRIPTION_MAX_TOKENS,
     OPENAI_EXPERIMENTAL_TELEMETRY: process.env.OPENAI_EXPERIMENTAL_TELEMETRY,
+    // New compression-related settings
+    OPENAI_ENABLE_PROMPT_COMPRESSION: process.env.OPENAI_ENABLE_PROMPT_COMPRESSION,
+    OPENAI_COMPRESSION_RULE_SET_IDS: process.env.OPENAI_COMPRESSION_RULE_SET_IDS,
+    OPENAI_COMPRESSION_LANGUAGE: process.env.OPENAI_COMPRESSION_LANGUAGE,
+    OPENAI_COMPRESSION_CATEGORY: process.env.OPENAI_COMPRESSION_CATEGORY,
   },
   async init(_config, runtime) {
     // do check in the background
@@ -372,6 +475,24 @@ export const openaiPlugin: Plugin = {
           );
           return;
         }
+        
+        // Log compression status
+        if (isCompressionEnabled(runtime)) {
+          logger.info('[OpenAI] Prompt compression is ENABLED');
+          const options = getCompressionOptions(runtime);
+          if (options.ruleSetIds?.length) {
+            logger.info(`[OpenAI] Using rule sets: ${options.ruleSetIds.join(', ')}`);
+          }
+          if (options.language) {
+            logger.info(`[OpenAI] Compression language: ${options.language}`);
+          }
+          if (options.category) {
+            logger.info(`[OpenAI] Compression category: ${options.category}`);
+          }
+        } else {
+          logger.info('[OpenAI] Prompt compression is DISABLED');
+        }
+        
         try {
           const baseURL = getBaseURL(runtime);
           const response = await fetch(`${baseURL}/models`, {
@@ -442,6 +563,15 @@ export const openaiPlugin: Plugin = {
         const emptyVector = Array(embeddingDimension).fill(0);
         emptyVector[0] = 0.3;
         return emptyVector;
+      }
+
+      // Optionally compress text for embeddings (can be disabled separately)
+      const compressionEnabledForEmbeddings = 
+        getSetting(runtime, 'OPENAI_COMPRESS_EMBEDDINGS', 'false') === 'true';
+      
+      if (compressionEnabledForEmbeddings) {
+        const { compressedPrompt } = compressPrompt(runtime, text, 'TEXT_EMBEDDING');
+        text = compressedPrompt;
       }
 
       const embeddingBaseURL = getEmbeddingBaseURL(runtime);
@@ -536,11 +666,14 @@ export const openaiPlugin: Plugin = {
       const experimentalTelemetry = getExperimentalTelemetry(runtime);
 
       logger.log(`[OpenAI] Using TEXT_SMALL model: ${modelName}`);
-      logger.log(prompt);
+      
+      // Compress the prompt
+      const { compressedPrompt } = compressPrompt(runtime, prompt, 'TEXT_SMALL');
+      logger.log(compressedPrompt);
 
       const { text: openaiResponse, usage } = await generateText({
         model: openai.languageModel(modelName),
-        prompt: prompt,
+        prompt: compressedPrompt,
         system: runtime.character.system ?? undefined,
         temperature: temperature,
         maxTokens: maxTokens,
@@ -553,7 +686,7 @@ export const openaiPlugin: Plugin = {
       });
 
       if (usage) {
-        emitModelUsageEvent(runtime, ModelType.TEXT_SMALL, prompt, usage);
+        emitModelUsageEvent(runtime, ModelType.TEXT_SMALL, compressedPrompt, usage);
       }
 
       return openaiResponse;
@@ -574,16 +707,19 @@ export const openaiPlugin: Plugin = {
       const experimentalTelemetry = getExperimentalTelemetry(runtime);
 
       logger.log(`[OpenAI] Using TEXT_LARGE model: ${modelName}`);
-      logger.log(prompt);
+      
+      // Compress the prompt
+      const { compressedPrompt } = compressPrompt(runtime, prompt, 'TEXT_LARGE');
+      logger.log(compressedPrompt);
 
       const { text: openaiResponse, usage } = await generateText({
         model: openai.languageModel(modelName),
-        prompt: prompt,
+        prompt: compressedPrompt,
         system: runtime.character.system ?? undefined,
         temperature: temperature,
         maxTokens: maxTokens,
         frequencyPenalty: frequencyPenalty,
-        presencePenalty: presencePenalty,
+        presencePenalty: presencePenality,
         stopSequences: stopSequences,
         experimental_telemetry: {
           isEnabled: experimentalTelemetry,
@@ -591,7 +727,7 @@ export const openaiPlugin: Plugin = {
       });
 
       if (usage) {
-        emitModelUsageEvent(runtime, ModelType.TEXT_LARGE, prompt, usage);
+        emitModelUsageEvent(runtime, ModelType.TEXT_LARGE, compressedPrompt, usage);
       }
 
       return openaiResponse;
@@ -606,7 +742,10 @@ export const openaiPlugin: Plugin = {
     ) => {
       const n = params.n || 1;
       const size = params.size || '1024x1024';
-      const prompt = params.prompt;
+      
+      // Compress the prompt for image generation
+      const { compressedPrompt } = compressPrompt(runtime, params.prompt, 'IMAGE');
+      
       const modelName = 'dall-e-3'; // Default DALL-E model
       logger.log(`[OpenAI] Using IMAGE model: ${modelName}`);
 
@@ -625,7 +764,7 @@ export const openaiPlugin: Plugin = {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            prompt: prompt,
+            prompt: compressedPrompt,
             n: n,
             size: size,
           }),
@@ -670,11 +809,18 @@ export const openaiPlugin: Plugin = {
           'Please analyze this image and provide a title and detailed description.';
       }
 
+      // Compress the prompt text for image description
+      const { compressedPrompt: compressedPromptText } = compressPrompt(
+        runtime, 
+        promptText, 
+        'IMAGE_DESCRIPTION'
+      );
+
       const messages = [
         {
           role: 'user',
           content: [
-            { type: 'text', text: promptText },
+            { type: 'text', text: compressedPromptText },
             { type: 'image_url', image_url: { url: imageUrl } },
           ],
         },
@@ -864,6 +1010,33 @@ export const openaiPlugin: Plugin = {
             );
             if (!response.ok) {
               throw new Error(`Failed to validate OpenAI API key: ${response.statusText}`);
+            }
+          },
+        },
+        {
+          name: 'openai_test_prompt_compression',
+          fn: async (runtime: IAgentRuntime) => {
+            try {
+              const testPrompt = 'Please provide a comprehensive and detailed explanation about the nature of artificial intelligence, including its various applications, potential benefits, and challenges.';
+              const result = PromptCompressorV3.analyze(testPrompt, getCompressionOptions(runtime));
+              
+              logger.log({
+                original: result.originalTokens,
+                compressed: result.compressedTokens,
+                saved: result.savedTokens,
+                ratio: `${result.compressionRatio.toFixed(2)}%`,
+                savedCost: `$${result.savedCost.toFixed(4)}`
+              }, 'Compression test results');
+              
+              if (result.savedTokens > 0) {
+                logger.log('Prompt compression test successful');
+              } else {
+                logger.warn('No compression achieved in test');
+              }
+            } catch (error: unknown) {
+              const message = error instanceof Error ? error.message : String(error);
+              logger.error(`Error in prompt compression test: ${message}`);
+              throw error;
             }
           },
         },
