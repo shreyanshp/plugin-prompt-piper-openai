@@ -719,7 +719,7 @@ export const openaiPlugin: Plugin = {
         temperature: temperature,
         maxTokens: maxTokens,
         frequencyPenalty: frequencyPenalty,
-        presencePenalty: presencePenality,
+        presencePenalty: presencePenalty,
         stopSequences: stopSequences,
         experimental_telemetry: {
           isEnabled: experimentalTelemetry,
